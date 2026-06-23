@@ -61,3 +61,134 @@
 # {'type': 'metrics', 'dataset': 'train', 'r2': 0.8, 'mse': 0.7, 'mad': 0.9}
 # {'type': 'metrics', 'dataset': 'test', 'r2': 0.7, 'mse': 0.6, 'mad': 0.8}
 #
+
+import gzip
+import json
+import os
+import pickle
+from glob import glob
+
+import pandas as pd
+from sklearn.compose import ColumnTransformer
+from sklearn.feature_selection import SelectKBest, f_regression
+from sklearn.linear_model import LinearRegression
+from sklearn.metrics import mean_squared_error, median_absolute_error, r2_score
+from sklearn.model_selection import GridSearchCV
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import MinMaxScaler, OneHotEncoder
+
+
+def load_data():
+    df_train = pd.read_csv(
+        "./files/input/train_data.csv.zip",
+        index_col=False,
+        compression="zip",
+    )
+    df_test = pd.read_csv(
+        "./files/input/test_data.csv.zip",
+        index_col=False,
+        compression="zip",
+    )
+    return df_train, df_test
+
+
+def clean_data(df):
+    df = df.copy()
+    df["Age"] = 2021 - df["Year"]
+    df = df.drop(columns=["Year", "Car_Name"])
+    return df
+
+
+def split_data(df):
+    return df.drop(columns=["Present_Price"]), df["Present_Price"]
+
+
+def make_pipeline(x_train):
+    categorical_features = ["Fuel_Type", "Selling_type", "Transmission"]
+    numerical_features = [col for col in x_train.columns if col not in categorical_features]
+
+    preprocessor = ColumnTransformer(
+        transformers=[
+            ("cat", OneHotEncoder(), categorical_features),
+            ("scaler", MinMaxScaler(), numerical_features),
+        ]
+    )
+
+    pipeline = Pipeline(
+        [
+            ("preprocessor", preprocessor),
+            ("feature_selection", SelectKBest(f_regression)),
+            ("classifier", LinearRegression()),
+        ]
+    )
+    return pipeline
+
+
+def create_estimator(pipeline):
+    param_grid = {
+        "feature_selection__k": range(1, 25),
+        "classifier__fit_intercept": [True, False],
+        "classifier__positive": [True, False],
+    }
+
+    grid_search = GridSearchCV(
+        estimator=pipeline,
+        param_grid=param_grid,
+        cv=10,
+        scoring="neg_mean_absolute_error",
+        n_jobs=-1,
+        refit=True,
+        verbose=1,
+    )
+    return grid_search
+
+
+def _create_output_directory(output_directory):
+    if os.path.exists(output_directory):
+        for file in glob(f"{output_directory}/*"):
+            os.remove(file)
+        os.rmdir(output_directory)
+    os.makedirs(output_directory)
+
+
+def _save_model(path, estimator):
+    _create_output_directory("files/models/")
+    with gzip.open(path, "wb") as f:
+        pickle.dump(estimator, f)
+
+
+def calculate_metrics(dataset_type, y_true, y_pred):
+    return {
+        "type": "metrics",
+        "dataset": dataset_type,
+        "r2": float(r2_score(y_true, y_pred)),
+        "mse": float(mean_squared_error(y_true, y_pred)),
+        "mad": float(median_absolute_error(y_true, y_pred)),
+    }
+
+
+def _run_jobs():
+    df_train, df_test = load_data()
+    df_train = clean_data(df_train)
+    df_test = clean_data(df_test)
+
+    x_train, y_train = split_data(df_train)
+    x_test, y_test = split_data(df_test)
+
+    pipeline = make_pipeline(x_train)
+    estimator = create_estimator(pipeline)
+    estimator.fit(x_train, y_train)
+
+    _save_model(os.path.join("files/models/", "model.pkl.gz"), estimator)
+
+    train_metrics = calculate_metrics("train", y_train, estimator.predict(x_train))
+    test_metrics = calculate_metrics("test", y_test, estimator.predict(x_test))
+
+    os.makedirs("files/output/", exist_ok=True)
+    with open("files/output/metrics.json", "w", encoding="utf-8") as f:
+        f.write(json.dumps(train_metrics) + "\n")
+        f.write(json.dumps(test_metrics) + "\n")
+
+
+if __name__ == "__main__":
+    _run_jobs()
